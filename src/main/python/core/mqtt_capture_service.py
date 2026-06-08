@@ -2,7 +2,8 @@
 Bosch Camera MQTT 觸發串流影像擷取系統
 
 當收到 MQTT 訊息 (MotionAlarm State:true) 時，
-擷取當下時間往前200ms、往前400ms、往後200ms、往後400ms 共4張照片，
+以觸發時間為中心，往前1秒、往後1秒，每200ms抽取一張，
+加上當下時間共11張照片，
 存放至 C:\\Bosch\\ 並按照年月日小時區分資料夾。
 """
 
@@ -47,7 +48,7 @@ class Logger:
 # StreamBuffer - RTSP 環形緩衝區
 # ============================================================
 class StreamBuffer:
-    def __init__(self, rtsp_url, buffer_seconds=2.0):
+    def __init__(self, rtsp_url, buffer_seconds=3.0):
         self.rtsp_url = rtsp_url
         self.buffer_seconds = buffer_seconds
         self.buffer = deque(maxlen=1000)
@@ -89,7 +90,7 @@ class StreamBuffer:
                 if fps > 0:
                     self.fps = fps
                 max_frames = int(self.buffer_seconds * self.fps * 2)
-                self.buffer = deque(maxlen=max(max_frames, 200))
+                self.buffer = deque(maxlen=max(max_frames, 300))
                 print(f"  📹 RTSP 連線成功 | FPS: {self.fps:.1f} | 緩衝: {self.buffer_seconds}s")
                 retry_count = 0
 
@@ -198,11 +199,9 @@ class MQTTCaptureService:
 
     def _trigger_capture(self):
         """
-        觸發擷取: 一次抽 4 張照片
-        - 往前 400ms
-        - 往前 200ms
-        - 往後 200ms
-        - 往後 400ms
+        觸發擷取: 一次抽 11 張照片
+        以觸發時間為中心，往前1秒、往後1秒，每200ms一張
+        -1000ms, -800ms, -600ms, -400ms, -200ms, 0ms, +200ms, +400ms, +600ms, +800ms, +1000ms
         """
         if self.stream_buffer is None:
             self.logger.error("❌ 串流緩衝區尚未初始化")
@@ -210,11 +209,11 @@ class MQTTCaptureService:
 
         trigger_time = datetime.now()
 
-        # 定義 4 個擷取時間點 (相對觸發時間的偏移 ms)
-        offsets_ms = [-400, -200, +200, +400]
+        # 定義 11 個擷取時間點 (相對觸發時間的偏移 ms)
+        offsets_ms = [-1000, -800, -600, -400, -200, 0, +200, +400, +600, +800, +1000]
 
-        # 等待往後 400ms 的影格進入緩衝區
-        time.sleep(0.5)
+        # 等待往後 1000ms 的影格進入緩衝區
+        time.sleep(1.1)
 
         save_dir = self._get_save_directory(trigger_time)
         timestamp_prefix = trigger_time.strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -229,8 +228,15 @@ class MQTTCaptureService:
                 continue
 
             frame, actual_time = result
-            sign = "+" if offset >= 0 else ""
-            filename = f"{timestamp_prefix}_{sign}{offset}ms.jpg"
+
+            if offset == 0:
+                sign_str = "0"
+            elif offset > 0:
+                sign_str = f"+{offset}"
+            else:
+                sign_str = f"{offset}"
+
+            filename = f"{timestamp_prefix}_{sign_str}ms.jpg"
             filepath = os.path.join(save_dir, filename)
 
             try:
@@ -240,7 +246,7 @@ class MQTTCaptureService:
             except Exception as e:
                 self.logger.error(f"  ❌ 儲存失敗 {filepath}: {e}")
 
-        self.logger.info(f"✅ 共儲存 {saved_count}/4 張影像至: {save_dir}")
+        self.logger.info(f"✅ 共儲存 {saved_count}/11 張影像至: {save_dir}")
 
     def _get_save_directory(self, dt):
         """依照年月日小時建立資料夾"""
@@ -262,7 +268,7 @@ class MQTTCaptureService:
         print(f"  RTSP: {self.rtsp_url}")
         print(f"  MQTT: {self.mqtt_ip}:{self.mqtt_port}")
         print(f"  存檔: {self.save_root}")
-        print(f"  擷取: 觸發時 -400ms, -200ms, +200ms, +400ms (共4張)")
+        print(f"  擷取: 前後各1秒, 每200ms一張, 共11張")
         print("=" * 50)
         print()
 
@@ -270,7 +276,7 @@ class MQTTCaptureService:
         print("[1/3] 啟動 RTSP 串流連線...")
         self.stream_buffer = StreamBuffer(
             rtsp_url=self.rtsp_url,
-            buffer_seconds=2.0
+            buffer_seconds=3.0  # 緩衝 3 秒確保前後 1 秒都有資料
         )
         self.stream_buffer.start()
         time.sleep(3)
